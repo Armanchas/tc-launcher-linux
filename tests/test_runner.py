@@ -193,3 +193,37 @@ def test_stop_is_noop_when_idle(config):
     runner = GameRunner(config)
     runner.stop()
     assert runner.user_stopped is False
+
+
+def test_build_command_scrubs_frozen_env(config, monkeypatch):
+    """In the frozen (AppImage) build, PyInstaller's LD_LIBRARY_PATH must not
+    leak into the game launch chain: gamemoderun is a bash script, and host
+    bash crashes resolving symbols against the bundle's older libreadline."""
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/tmp/_MEIxyz/_internal")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    _, env = GameRunner(config).build_command()
+    assert "LD_LIBRARY_PATH" not in env
+
+
+def test_build_command_frozen_env_restores_original(config, monkeypatch):
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/tmp/_MEIxyz/_internal")
+    monkeypatch.setenv("LD_LIBRARY_PATH_ORIG", "/opt/custom/lib")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    _, env = GameRunner(config).build_command()
+    assert env["LD_LIBRARY_PATH"] == "/opt/custom/lib"
+
+
+def test_build_command_keeps_env_when_not_frozen(config, monkeypatch):
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/opt/dev/lib")
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    _, env = GameRunner(config).build_command()
+    assert env["LD_LIBRARY_PATH"] == "/opt/dev/lib"
+
+
+def test_build_command_config_env_vars_survive_frozen_scrub(config, monkeypatch):
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/tmp/_MEIxyz/_internal")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    config.env_vars = {"LD_LIBRARY_PATH": "/from/settings", "DXVK_HUD": "fps"}
+    _, env = GameRunner(config).build_command()
+    assert env["LD_LIBRARY_PATH"] == "/from/settings"
+    assert env["DXVK_HUD"] == "fps"

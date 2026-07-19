@@ -11,11 +11,13 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 from dataclasses import dataclass
 from typing import Callable
 
 from .config import LAUNCHER_USERDIR, ConfigManager
+from .desktop import clean_child_env
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +145,12 @@ class GameRunner:
             raise RuntimeError("No Proton version selected. Pick one in Settings.")
 
         env = dict(os.environ)
+        if getattr(sys, "frozen", False):
+            # The whole launch chain (gamemoderun/mangohud are bash scripts,
+            # umu-run is host Python) must use HOST libraries, not the frozen
+            # bundle's: PyInstaller's LD_LIBRARY_PATH makes host bash resolve
+            # symbols against the bundled (older) libreadline and crash.
+            env = clean_child_env(env)
         env.update(self.config.env_vars)
         env["WINEPREFIX"] = os.path.expanduser(self.config.wine_prefix)
         env["PROTONPATH"] = self.config.proton_path
