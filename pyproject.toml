@@ -1,0 +1,31 @@
+[project]
+name = "tc-launcher-linux"
+dynamic = ["version"]
+description = "Linux launcher for The Cycle community servers"
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.11"
+dependencies = [
+    "PySide6",
+    "requests",
+    "xxhash",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+tclauncher = "tclauncher.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["tclauncher*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "tclauncher.version.APP_VERSION"}
+
+[tool.setuptools.package-data]
+tclauncher = ["assets/*"]
