@@ -1,4 +1,4 @@
-"""Open files/folders with the host's default handler, safely from a frozen build.
+"""Open files/folders/URLs with the host's default handler, safely from a frozen build.
 
 QDesktopServices.openUrl spawns xdg-open with the *frozen* process environment:
 PyInstaller points LD_LIBRARY_PATH into the bundle (and Qt adds plugin-path
@@ -11,6 +11,7 @@ import logging
 import os
 import shutil
 import subprocess
+import webbrowser
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,27 @@ def open_path(path: str) -> bool:
         return False
     subprocess.Popen(
         [xdg_open, path],
+        env=clean_child_env(dict(os.environ)),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    return True
+
+
+def open_url(url: str) -> bool:
+    """Open a URL in the default browser.
+
+    webbrowser.open() would spawn the browser helper with the frozen
+    environment (same crash as open_path's rationale), so prefer xdg-open
+    with a scrubbed environment; webbrowser is the non-frozen fallback.
+    """
+    xdg_open = shutil.which("xdg-open")
+    if xdg_open is None:
+        webbrowser.open(url)
+        return True
+    subprocess.Popen(
+        [xdg_open, url],
         env=clean_child_env(dict(os.environ)),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

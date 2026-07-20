@@ -8,13 +8,13 @@ session via the backend's idp endpoints.
 import logging
 import threading
 import time
-import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Callable
 from urllib.parse import parse_qs, urlparse
 
 from .backend import BackendClient
 from .config import ConfigManager
+from .desktop import open_url
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +84,7 @@ class SessionManager:
         self.on_successful_login = on_successful_login
         if self.server is None:
             self._start_callback_server()
-        webbrowser.open(
+        open_url(
             f"{self.config.server_discovery_addr}/steam/openid/login?launcher_redirect={self.redirect_url}"
         )
 
