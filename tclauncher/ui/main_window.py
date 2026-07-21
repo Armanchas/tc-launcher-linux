@@ -20,7 +20,7 @@ from ..backend import BackendClient, ServerDiscoveryStatus
 from ..config import LAUNCHER_USERDIR, PROTOCOL_VERSION, ConfigManager
 from ..desktop import open_path
 from ..mods import ModManager
-from ..runner import GAME_LOG, GameRunner, is_steam_running
+from ..runner import GAME_LOG, GameRunner, steam_preflight_issue
 from ..version import APP_VERSION
 from .mods_dialog import ModsDialog
 from .server_dialog import ServerDialog
@@ -370,12 +370,13 @@ class MainWindow(QMainWindow):
         self.session_manager.initiate_login(self.login_succeeded.emit)
 
     def _start_play(self):
-        if not is_steam_running():
+        steam_issue = steam_preflight_issue(
+            self.config.env_vars.get("STEAM_COMPAT_CLIENT_INSTALL_PATH", "")
+        )
+        if steam_issue:
             answer = QMessageBox.warning(
-                self, "Steam is not running",
-                "The native Steam client does not appear to be running.\n\n"
-                "The game authenticates through Steam, so launching without it "
-                "will fail with an authentication error. Launch anyway?",
+                self, "Steam setup problem",
+                steam_issue + "\n\nLaunch anyway?",
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
             )
             if answer != QMessageBox.Yes:
