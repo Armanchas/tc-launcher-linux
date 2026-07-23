@@ -4,4 +4,4 @@ Distinct from config.PROTOCOL_VERSION, which must track prospect-og's VERSION
 for server compatibility.
 """
 
-APP_VERSION = "1.0.4"
+APP_VERSION = "1.0.5"

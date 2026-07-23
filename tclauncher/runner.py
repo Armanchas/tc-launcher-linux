@@ -246,6 +246,58 @@ def prefix_steam_bridge(wineprefix: str) -> str:
     return "MISSING (Proton did not install the steamclient bridge)"
 
 
+# (source name in <steam>/legacycompat/, dest name in the prefix Steam dir).
+# Mirrors what GE-Proton's `proton` setup_prefix copies; SteamService.exe is
+# installed as steam.exe. install_steam_bridge() below does this copy ourselves
+# because umu drops STEAM_COMPAT_CLIENT_INSTALL_PATH before Proton runs.
+_STEAM_BRIDGE_FILES = [
+    ("steamclient.dll", "steamclient.dll"),
+    ("steamclient64.dll", "steamclient64.dll"),
+    ("GameOverlayRenderer64.dll", "GameOverlayRenderer64.dll"),
+    ("SteamService.exe", "steam.exe"),
+    ("Steam.dll", "Steam.dll"),
+]
+
+
+def install_steam_bridge(steam_path: str, wineprefix: str) -> str:
+    """Copy the Windows steamclient bridge DLLs from the host Steam client's
+    legacycompat/ dir into the prefix's Program Files (x86)/Steam/, so the
+    game's SteamAPI_Init can reach the running Steam client.
+
+    Proton's setup_prefix is supposed to do this, but umu never forwards our
+    STEAM_COMPAT_CLIENT_INSTALL_PATH to Proton — it seeds the value empty and
+    overwrites ours (umu_run.py) — so Proton's copy silently no-ops and the
+    prefix Steam dir is left empty (-> 'conditions not met' -> SteamUnavailable).
+    We do the copy ourselves, dereferencing symlinks (wine can't follow a
+    host-absolute symlink from inside the prefix) and overwriting each launch so
+    host Steam client updates are picked up. Returns a one-line summary for the
+    launch log.
+    """
+    src_dir = os.path.join(os.path.expanduser(steam_path), "legacycompat")
+    dest_dir = os.path.join(
+        os.path.expanduser(wineprefix), "drive_c", "Program Files (x86)", "Steam"
+    )
+    if not os.path.isdir(src_dir):
+        return (
+            f"legacycompat not found at {src_dir}; steamclient bridge not "
+            "installed (update/restart Steam so it downloads its Proton files)"
+        )
+    os.makedirs(dest_dir, exist_ok=True)
+    installed, missing = [], []
+    for src_name, dest_name in _STEAM_BRIDGE_FILES:
+        src = os.path.join(src_dir, src_name)
+        if not os.path.isfile(src):  # isfile() follows symlinks
+            missing.append(src_name)
+            continue
+        # copyfile() dereferences symlinks, producing a real file in the prefix.
+        shutil.copyfile(src, os.path.join(dest_dir, dest_name))
+        installed.append(dest_name)
+    summary = f"installed {len(installed)}/{len(_STEAM_BRIDGE_FILES)} into {dest_dir}"
+    if missing:
+        summary += f" (missing sources: {', '.join(missing)})"
+    return summary
+
+
 def steam_login_summary(steam_path: str) -> str:
     """Best-effort read of loginusers.vdf: account count, most-recent flag, and
     a warning if any account has WantsOfflineMode=1 (offline mode blocks auth).
@@ -359,9 +411,14 @@ class GameRunner:
         self.config = config
         self.process: subprocess.Popen | None = None
         self.user_stopped = False
+        # True from launch() until the game process exits. Distinct from
+        # `process`, which is briefly None during the first-run createprefix
+        # pass (and between it and the game start) — is_running() must stay
+        # true across that gap so the UI keeps showing "Stop game".
+        self._starting = False
 
     def is_running(self) -> bool:
-        return self.process is not None
+        return self._starting or self.process is not None
 
     def prefix_initialized(self) -> bool:
         """True once Proton has built the prefix. When False, the next launch
@@ -458,6 +515,28 @@ class GameRunner:
         argv += self.config.run_args
         return argv, env
 
+    def _run_createprefix(self, umu: str, env: dict, log_file) -> bool:
+        """Build the Proton prefix without launching the game (umu's
+        'createprefix' verb), so install_steam_bridge() can drop the steamclient
+        DLLs in before the game calls SteamAPI_Init. A normal launch builds the
+        prefix and starts the game in one umu invocation, leaving no such window.
+        Returns True if the prefix is ready, False if stopped or it failed."""
+        log_file.write("First run: building Proton prefix (umu createprefix)…\n\n")
+        log_file.flush()
+        self.process = subprocess.Popen(
+            [umu, "createprefix"], env=env, cwd=self.config.game_dir,
+            stdout=log_file, stderr=subprocess.STDOUT, start_new_session=True,
+        )
+        self.process.wait()
+        rc = self.process.returncode
+        self.process = None
+        if self.user_stopped:
+            return False
+        if rc != 0:
+            log_file.write(f"(umu createprefix exited {rc})\n\n")
+            log_file.flush()
+        return self.prefix_initialized()
+
     def launch(self, on_exit: Callable | None = None):
         """Start the game and watch it on a background thread.
 
@@ -465,10 +544,15 @@ class GameRunner:
         launch: umu downloads the Steam Linux Runtime and builds the Proton
         prefix, which takes minutes with no game window — without a captured
         log the launcher looks frozen and failures are invisible.
+
+        The whole sequence — first-run prefix build, steamclient bridge
+        install, then the game — runs on a background thread so the slow
+        createprefix pass never blocks the GUI.
         """
         argv, env = self.build_command()
         os.makedirs(os.path.expanduser(self.config.wine_prefix), exist_ok=True)
         self.write_steam_appid()
+        umu = find_umu(self.config.umu_path)
         logger.info(f"Launching (output -> {GAME_LOG}): {argv}")
 
         log_file = open(GAME_LOG, "w")
@@ -484,22 +568,43 @@ class GameRunner:
             log_file.write(f"(launch diagnostics failed: {e})\n\n")
         log_file.flush()
         self.user_stopped = False
-        self.process = subprocess.Popen(
-            argv, env=env, cwd=self.config.game_dir,
-            stdout=log_file, stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
+        self._starting = True
 
-        def watch():
-            self.process.wait()
-            returncode = self.process.returncode
-            self.process = None
-            log_file.close()
-            logger.info(f"Game process exited with code {returncode}")
-            if on_exit is not None:
-                on_exit()
+        def run():
+            try:
+                if not self.prefix_initialized():
+                    if not self._run_createprefix(umu, env, log_file):
+                        return  # stopped or failed before the game could start
+                # Every launch: (re)install the steamclient bridge into the
+                # prefix. umu never forwards STEAM_COMPAT_CLIENT_INSTALL_PATH to
+                # Proton, so Proton's own copy no-ops; without this the prefix
+                # Steam dir stays empty and Steam auth fails "conditions not
+                # met". Refreshing each launch also picks up client updates.
+                steam_path = env.get("STEAM_COMPAT_CLIENT_INSTALL_PATH", "")
+                if steam_path:
+                    summary = install_steam_bridge(steam_path, env["WINEPREFIX"])
+                    log_file.write(f"steam bridge: {summary}\n\n")
+                    log_file.flush()
+                if self.user_stopped:
+                    return
+                self.process = subprocess.Popen(
+                    argv, env=env, cwd=self.config.game_dir,
+                    stdout=log_file, stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+                self.process.wait()
+            except Exception:
+                logger.exception("Game launch failed")
+            finally:
+                returncode = self.process.returncode if self.process else None
+                self.process = None
+                self._starting = False
+                log_file.close()
+                logger.info(f"Game process exited with code {returncode}")
+                if on_exit is not None:
+                    on_exit()
 
-        threading.Thread(target=watch, daemon=True).start()
+        threading.Thread(target=run, daemon=True).start()
 
     def stop(self):
         """User-requested stop: terminate, and kill after a grace period.

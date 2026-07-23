@@ -10,6 +10,7 @@ from tclauncher.runner import (
     GameRunner,
     find_umu,
     format_launch_diagnostics,
+    install_steam_bridge,
     prefix_steam_bridge,
     relevant_env,
     running_steam,
@@ -457,3 +458,103 @@ def test_format_launch_diagnostics_includes_system_and_env(tmp_path, monkeypatch
     assert "Steam login (on-disk): 1 account(s)" in text
     assert "relevant env:" in text
     assert "XDG_RUNTIME_DIR=/run/user/1000" in text
+
+
+# --- Steam bridge install (umu drops STEAM_COMPAT_CLIENT_INSTALL_PATH) -----
+
+
+def _seed_legacycompat(steam_dir, names):
+    """Create <steam_dir>/legacycompat/ with each name as a file whose bytes
+    are its own name, so copies can be identified. Returns the legacycompat dir."""
+    lc = steam_dir / "legacycompat"
+    lc.mkdir(parents=True)
+    for name in names:
+        (lc / name).write_bytes(name.encode())
+    return lc
+
+
+_ALL_BRIDGE_SOURCES = [
+    "steamclient.dll",
+    "steamclient64.dll",
+    "GameOverlayRenderer64.dll",
+    "SteamService.exe",
+    "Steam.dll",
+]
+
+
+def test_install_steam_bridge_copies_all_five_with_remap(tmp_path):
+    steam = tmp_path / "Steam"
+    _seed_legacycompat(steam, _ALL_BRIDGE_SOURCES)
+    prefix = tmp_path / "prefix"
+
+    install_steam_bridge(str(steam), str(prefix))
+
+    dest = prefix / "drive_c" / "Program Files (x86)" / "Steam"
+    # SteamService.exe is installed as steam.exe (Proton's mapping).
+    assert (dest / "steamclient.dll").read_bytes() == b"steamclient.dll"
+    assert (dest / "steamclient64.dll").read_bytes() == b"steamclient64.dll"
+    assert (dest / "GameOverlayRenderer64.dll").read_bytes() == b"GameOverlayRenderer64.dll"
+    assert (dest / "Steam.dll").read_bytes() == b"Steam.dll"
+    assert (dest / "steam.exe").read_bytes() == b"SteamService.exe"
+    assert not (dest / "SteamService.exe").exists()
+
+
+def test_install_steam_bridge_dereferences_symlinks(tmp_path):
+    """In real Steam, legacycompat/steamclient64.dll is a symlink to
+    ../steamclient64.dll. Proton/wine can't follow a host-absolute symlink from
+    inside the prefix, so the installed file must be a real copy."""
+    steam = tmp_path / "Steam"
+    lc = _seed_legacycompat(steam, ["steamclient.dll"])
+    (steam / "steamclient64.dll").write_bytes(b"real-64-payload")
+    (lc / "steamclient64.dll").symlink_to("../steamclient64.dll")
+
+    install_steam_bridge(str(steam), str(prefix := tmp_path / "prefix"))
+
+    installed = prefix / "drive_c" / "Program Files (x86)" / "Steam" / "steamclient64.dll"
+    assert not installed.is_symlink()
+    assert installed.read_bytes() == b"real-64-payload"
+
+
+def test_install_steam_bridge_refreshes_on_second_run(tmp_path):
+    """Every launch refreshes the bridge so host Steam client updates are picked
+    up; a stale prefix copy must be overwritten."""
+    steam = tmp_path / "Steam"
+    lc = _seed_legacycompat(steam, _ALL_BRIDGE_SOURCES)
+    prefix = tmp_path / "prefix"
+    install_steam_bridge(str(steam), str(prefix))
+
+    (lc / "steamclient64.dll").write_bytes(b"updated-after-steam-update")
+    install_steam_bridge(str(steam), str(prefix))
+
+    dest = prefix / "drive_c" / "Program Files (x86)" / "Steam" / "steamclient64.dll"
+    assert dest.read_bytes() == b"updated-after-steam-update"
+
+
+def test_install_steam_bridge_skips_missing_sources(tmp_path):
+    """Missing individual source files are skipped (not fatal); whatever exists
+    is still installed."""
+    steam = tmp_path / "Steam"
+    _seed_legacycompat(steam, ["steamclient.dll", "steamclient64.dll"])
+    prefix = tmp_path / "prefix"
+
+    summary = install_steam_bridge(str(steam), str(prefix))
+
+    dest = prefix / "drive_c" / "Program Files (x86)" / "Steam"
+    assert (dest / "steamclient.dll").exists()
+    assert (dest / "steamclient64.dll").exists()
+    assert not (dest / "Steam.dll").exists()
+    assert "2/5" in summary
+
+
+def test_install_steam_bridge_no_legacycompat_is_not_fatal(tmp_path):
+    """A Steam install with no legacycompat/ yields a clear summary, no crash,
+    and no empty prefix Steam dir masquerading as success."""
+    steam = tmp_path / "Steam"
+    steam.mkdir()
+    prefix = tmp_path / "prefix"
+
+    summary = install_steam_bridge(str(steam), str(prefix))
+
+    assert "legacycompat not found" in summary
+    dest = prefix / "drive_c" / "Program Files (x86)" / "Steam" / "steamclient64.dll"
+    assert not dest.exists()
